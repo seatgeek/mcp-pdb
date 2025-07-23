@@ -29,6 +29,8 @@ output_thread = None          # Thread object for reading output
 
 # --- Helper Functions ---
 
+# Removed complex wrapper approach - using proper pytest debugging flags instead
+
 def read_pdb_output(process, output_queue):
     """Read output from the pdb process and put it in the queue."""
     try:
@@ -227,6 +229,20 @@ def find_venv_details(project_root):
     return None, None
 
 
+def has_poetry_config(project_root):
+    """Check if project has Poetry configuration in pyproject.toml"""
+    pyproject_path = os.path.join(project_root, "pyproject.toml")
+    if not os.path.exists(pyproject_path):
+        return False
+    
+    try:
+        with open(pyproject_path, 'r') as f:
+            content = f.read()
+            return '[tool.poetry]' in content
+    except (IOError, OSError):
+        return False
+
+
 def sanitize_arguments(args_str):
     """Validate and sanitize command line arguments to prevent injection."""
     dangerous_patterns = [';', '&&', '||', '`', '$(', '|', '>', '<']
@@ -244,13 +260,17 @@ def sanitize_arguments(args_str):
 # --- MCP Tools ---
 
 @mcp.tool()
-def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str:
+def start_debug(file_path: str, use_pytest: bool = False, args: str = "", pytest_debug_mode: str = "pdb") -> str:
     """Start a debugging session on a Python file within its project context.
 
     Args:
         file_path: Path to the Python file or test module to debug.
-        use_pytest: If True, run using pytest with --pdb.
+        use_pytest: If True, run using pytest with debugging support.
         args: Additional arguments to pass to the Python script or pytest (space-separated).
+        pytest_debug_mode: How to handle pytest debugging:
+            - "pdb": Run pytest --pdb (debug on failures)
+            - "trace": Run pytest --trace (debug at start of each test)
+            - "manual": Run python -m pdb -m pytest (full debugger control)
     """
     global pdb_process, pdb_running, current_file, current_project_root, output_thread
     global pdb_output_queue, breakpoints, current_args, current_use_pytest
@@ -310,7 +330,9 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
     try:
         # --- Determine Execution Environment ---
         use_uv = False
+        use_poetry = False
         uv_path = shutil.which("uv")
+        poetry_path = shutil.which("poetry")
         venv_python_path = None
         venv_bin_dir = None
 
@@ -320,13 +342,24 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
                  print("Found uv.lock, assuming uv project.")
                  use_uv = True
             else:
-                 # Optional: Could check pyproject.toml for [tool.uv]
-                 print("Found pyproject.toml and uv executable, tentatively trying uv.")
-                 # We'll let `uv run` determine if it's actually a uv project.
-                 use_uv = True # Tentatively true
+                 # Check pyproject.toml for [tool.uv] configuration
+                 try:
+                     with open(os.path.join(project_root, "pyproject.toml"), 'r') as f:
+                         content = f.read()
+                         if '[tool.uv]' in content:
+                             print("Found [tool.uv] in pyproject.toml, assuming uv project.")
+                             use_uv = True
+                 except (IOError, OSError):
+                     pass
 
-        if not use_uv:
-            # Look for a standard venv if uv isn't detected/used
+        if not use_uv and poetry_path and os.path.exists(os.path.join(project_root, "pyproject.toml")):
+            # Check for Poetry-specific indicators
+            if os.path.exists(os.path.join(project_root, "poetry.lock")) or has_poetry_config(project_root):
+                print("Found Poetry project")
+                use_poetry = True
+
+        if not use_uv and not use_poetry:
+            # Look for a standard venv if uv or poetry isn't detected/used
             venv_python_path, venv_bin_dir = find_venv_details(project_root)
 
         # --- Prepare Command and Subprocess Environment ---
@@ -361,11 +394,42 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
             env.pop('PYTHONHOME', None)
             base_cmd = ["uv", "run", "--"]
             if use_pytest:
-                # -s: show stdout/stderr, --pdbcls: use standard pdb
-                base_cmd.extend(["pytest", "--pdb", "-s", "--pdbcls=pdb:Pdb"])
+                if pytest_debug_mode == "manual":
+                    # Run pytest under full pdb control
+                    base_cmd.extend(["python", "-m", "pdb", "-m", "pytest"])
+                    cmd = base_cmd + ["-s", rel_file_path] + parsed_args
+                elif pytest_debug_mode == "trace":
+                    # Debug at start of each test
+                    base_cmd.extend(["pytest", "--trace", "-s"])
+                    cmd = base_cmd + [rel_file_path] + parsed_args
+                else:  # pytest_debug_mode == "pdb"
+                    # Debug on failures
+                    base_cmd.extend(["pytest", "--pdb", "-s"])
+                    cmd = base_cmd + [rel_file_path] + parsed_args
             else:
                 base_cmd.extend(["python", "-m", "pdb"])
-            cmd = base_cmd + [rel_file_path] + parsed_args
+                cmd = base_cmd + [rel_file_path] + parsed_args
+        elif use_poetry:
+            print(f"Using poetry run in: {project_root}")
+            # Clean potentially conflicting env vars for poetry run
+            env.pop('VIRTUAL_ENV', None)
+            env.pop('PYTHONHOME', None)
+            if use_pytest:
+                if pytest_debug_mode == "manual":
+                    # Run pytest under full pdb control
+                    base_cmd = ["poetry", "run", "python", "-m", "pdb", "-m", "pytest"]
+                    cmd = base_cmd + ["-s", rel_file_path] + parsed_args
+                elif pytest_debug_mode == "trace":
+                    # Debug at start of each test
+                    base_cmd = ["poetry", "run", "pytest", "--trace", "-s"]
+                    cmd = base_cmd + [rel_file_path] + parsed_args
+                else:  # pytest_debug_mode == "pdb"
+                    # Debug on failures
+                    base_cmd = ["poetry", "run", "pytest", "--pdb", "-s"]
+                    cmd = base_cmd + [rel_file_path] + parsed_args
+            else:
+                base_cmd = ["poetry", "run", "python", "-m", "pdb"]
+                cmd = base_cmd + [rel_file_path] + parsed_args
         elif venv_python_path:
             print(f"Using venv Python: {venv_python_path}")
             venv_dir = os.path.dirname(os.path.dirname(venv_bin_dir)) # Get actual venv root
@@ -387,15 +451,25 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
                     try:
                         result = subprocess.run([venv_python_path, "-m", "pytest", "--version"], capture_output=True, text=True, check=True, cwd=project_root, env=env)
                         print(f"Found pytest via '{venv_python_path} -m pytest'")
-                        cmd = [venv_python_path, "-m", "pytest", "--pdb", "-s", "--pdbcls=pdb:Pdb", rel_file_path] + parsed_args
+                        if pytest_debug_mode == "manual":
+                            cmd = [venv_python_path, "-m", "pdb", "-m", "pytest", "-s", rel_file_path] + parsed_args
+                        elif pytest_debug_mode == "trace":
+                            cmd = [venv_python_path, "-m", "pytest", "--trace", "-s", rel_file_path] + parsed_args
+                        else:  # pytest_debug_mode == "pdb"
+                            cmd = [venv_python_path, "-m", "pytest", "--pdb", "-s", rel_file_path] + parsed_args
                     except (subprocess.CalledProcessError, FileNotFoundError):
                          return f"Error: pytest not found or executable in the virtual environment at {venv_bin_dir}. Cannot run with --pytest."
                 else:
-                    cmd = [pytest_exe, "--pdb", "-s", "--pdbcls=pdb:Pdb", rel_file_path] + parsed_args
+                    if pytest_debug_mode == "manual":
+                        cmd = [venv_python_path, "-m", "pdb", "-m", "pytest", "-s", rel_file_path] + parsed_args
+                    elif pytest_debug_mode == "trace":
+                        cmd = [pytest_exe, "--trace", "-s", rel_file_path] + parsed_args
+                    else:  # pytest_debug_mode == "pdb"
+                        cmd = [pytest_exe, "--pdb", "-s", rel_file_path] + parsed_args
             else:
                 cmd = [venv_python_path, "-m", "pdb", rel_file_path] + parsed_args
         else:
-            print("Warning: No uv or standard venv detected in project root. Using system Python/pytest.")
+            print("Warning: No uv, poetry, or standard venv detected in project root. Using system Python/pytest.")
             # Fallback to system python/pytest found in PATH
             python_exe = shutil.which("python") or sys.executable # Find system python more reliably
             if not python_exe:
@@ -405,7 +479,12 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
                  pytest_exe = shutil.which("pytest")
                  if not pytest_exe:
                      return "Error: pytest command not found in system PATH. Cannot run with --pytest."
-                 cmd = [pytest_exe, "--pdb", "-s", "--pdbcls=pdb:Pdb", rel_file_path] + parsed_args
+                 if pytest_debug_mode == "manual":
+                     cmd = [python_exe, "-m", "pdb", "-m", "pytest", "-s", rel_file_path] + parsed_args
+                 elif pytest_debug_mode == "trace":
+                     cmd = [pytest_exe, "--trace", "-s", rel_file_path] + parsed_args
+                 else:  # pytest_debug_mode == "pdb"
+                     cmd = [pytest_exe, "--pdb", "-s", rel_file_path] + parsed_args
             else:
                  cmd = [python_exe, "-m", "pdb", rel_file_path] + parsed_args
 
@@ -443,7 +522,7 @@ def start_debug(file_path: str, use_pytest: bool = False, args: str = "") -> str
 
         # --- Wait for Initial Output & Verify Start ---
         print("Waiting for PDB to start...")
-        initial_output = get_pdb_output(timeout=3.0) # Longer timeout for potentially slow starts/imports
+        initial_output = get_pdb_output(timeout=30.0) # Longer timeout for potentially slow starts/imports
 
         # Check if process died immediately
         if pdb_process.poll() is not None:
@@ -996,6 +1075,8 @@ def end_debug() -> str:
     while not pdb_output_queue.empty():
         try: pdb_output_queue.get_nowait()
         except queue.Empty: break
+
+    # No cleanup needed for pytest debugging flags approach
 
     print("Debugging session ended and state cleared.")
     return result_message

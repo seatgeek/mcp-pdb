@@ -17,6 +17,8 @@ Works best with [uv](https://docs.astral.sh/uv/getting-started/features/)
 ```bash
 # Install the MCP server
 claude mcp add mcp-pdb -- uv run --with mcp-pdb mcp-pdb
+# or for poetry
+claude mcp add mcp-pdb -- poetry run mcp-pdb
 
 # Alternative: Install with specific Python version
 claude mcp add mcp-pdb -- uv run --python 3.13 --with mcp-pdb mcp-pdb
@@ -25,6 +27,7 @@ claude mcp add mcp-pdb -- uv run --python 3.13 --with mcp-pdb mcp-pdb
 ```
 
 ### Windsurf
+
 ```json
 {
   "mcpServers": {
@@ -39,13 +42,31 @@ claude mcp add mcp-pdb -- uv run --python 3.13 --with mcp-pdb mcp-pdb
     }
   }
 }
+
+```
+
+Or for poetry:
+
+```json
+        
+{
+  "mcpServers": {
+    "mcp-pdb": {
+      "command": "poetry",
+      "args": [
+        "run",
+        "mcp-pdb"
+      ]
+    }
+  }
+}
 ```
 
 ## Available Tools
 
 | Tool | Description |
 |------|-------------|
-| `start_debug(file_path, use_pytest, args)` | Start a debugging session for a Python file |
+| `start_debug(file_path, use_pytest, args, pytest_debug_mode)` | Start a debugging session for a Python file |
 | `send_pdb_command(command)` | Send a command to the running PDB instance |
 | `set_breakpoint(file_path, line_number)` | Set a breakpoint at a specific line |
 | `clear_breakpoint(file_path, line_number)` | Clear a breakpoint at a specific line |
@@ -73,10 +94,44 @@ claude mcp add mcp-pdb -- uv run --python 3.13 --with mcp-pdb mcp-pdb
 ## Features
 
 - Project-aware debugging with automatic virtual environment detection
-- Support for both direct Python debugging and pytest-based debugging
+- **Enhanced pytest integration** with multiple debugging modes:
+  - `pdb`: Debug only on test failures (traditional `--pdb`)
+  - `trace`: Hit a breakpoint at the start of each test (`--trace`)
+  - `manual`: Traditional "stop when the process is up, so I can set breakpoints" (`python -m pdb -m pytest`)
 - Automatic breakpoint tracking and restoration between sessions
-- Works with UV package manager
+- Works with UV, Poetry, and standard virtual environments
 - Variable inspection with type information and attribute listing
+
+## Pytest Debugging Modes
+
+When using `start_debug()` with `use_pytest=True`, you can specify different debugging approaches:
+
+### `pytest_debug_mode="pdb"` (Default)
+```python
+start_debug("test_file.py", use_pytest=True, pytest_debug_mode="pdb")
+```
+- Uses `pytest --pdb -s`
+- Debugger activates **only on test failures**
+- Best for: Finding and debugging failing tests
+
+### `pytest_debug_mode="trace"`
+```python
+start_debug("test_file.py", use_pytest=True, pytest_debug_mode="trace")
+```
+- Uses `pytest --trace -s`
+- Debugger activates **at the start of each test**
+- Best for: Step-by-step debugging of individual tests
+
+### `pytest_debug_mode="manual"` (Recommended for test suites)
+```python
+start_debug("test_file.py", use_pytest=True, pytest_debug_mode="manual", args="-k specific_test")
+```
+- Uses `python -m pdb -m pytest -s`
+- **Full debugger control from the start**
+- Set breakpoints with `b filename:line_number` before tests run
+- Continue with `c` to run the test suite
+- Only stops at your specific breakpoints, not every test
+- Best for: Debugging test suites with specific code paths
 
 ## Troubleshooting
 
