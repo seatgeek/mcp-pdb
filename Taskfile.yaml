@@ -4,3 +4,8 @@ tasks:
   dev:
     cmds:
       - mise exec uv -- uv sync
+
+  fix:
+    cmds:
+      - uv run ruff format .
+      - uv run ruff check --fix --unsafe-fixes .
