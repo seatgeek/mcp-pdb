@@ -1,11 +1,24 @@
 version: 3
 
 tasks:
-  dev:
+  sync:
+    desc: Sync the requirements, especially after first clone
     cmds:
       - mise exec uv -- uv sync
 
-  fix:
+  check-python-version:
     cmds:
-      - uv run ruff format .
-      - uv run ruff check --fix --unsafe-fixes .
+      - mise exec python -- python --version
+    internal: true
+
+  after-clone:
+    desc: Run this just after you clone the project to get started
+    cmds:
+      - task: check-python-version
+      - task: sync
+
+  fix:
+    desc: Fix my code before a commit, but on-demand
+    cmds:
+      - mise exec uv -- uv run ruff format .
+      - mise exec uv -- uv run ruff check --fix --unsafe-fixes .
